@@ -382,11 +382,25 @@ penguins_list_by_year <-
 files <- paste0("output/by_years/penguins_", names(penguins_list_by_year), ".csv")
 
 walk2(penguins_list_by_year, files, write_csv)
-  
-# option - using imap, or iwalk
+
+# option - using imap, or iwalk and defining a function
+
+save_file <- function(.x, .y) {
+  readr::write_csv(data, file = paste0("output/by_years/penguins_", year, ".csv"))
+}
+
 penguins_combined |>
   split(~year) |>
-  iwalk(~write_csv(.x, file = paste0("output/by_years/penguins_", .y, ".csv")))
+  iwalk(save_file)
+
+
+# option - using imap, or iwalk defining an inline anonymous function
+
+penguins_combined |>
+  split(~year) |>
+  iwalk(~write_csv(.x, file = paste0("output/by_years/penguins_", .y, ".csv"))
+  )
+
 ```
 
 
@@ -416,6 +430,25 @@ Try solving this in R using new skills:
 
 
 ```{r, instructor-solutions}
+
+data_migration <- 
+  penguins_combined |>
+  mutate(season= ifelse(month %in% c(1,2,3,12,11,10), "summer", "winter")) |>
+  group_by(species,season) |>
+  summarize(
+    med_lat=median(decimalLatitude,na.rm=TRUE),
+    med_lon=median(decimalLongitude,na.rm=TRUE)
+  ) |>
+  pivot_wider(names_from = `season`, values_from = c(`med_lat`, `med_lon`)) |>
+  mutate(
+    migration_distance = med_lat_summer - med_lat_winter
+  ) 
+
+data_migration |>
+  ggplot(aes(x=species,y=`migration_distance`)) +
+  geom_point() +
+  coord_flip()
+
 
 ```
 
@@ -454,7 +487,36 @@ Try solving this in R using new skills:
 Demonstrator solutions: 
 
 ```{r, instructor-solutions}
+# Records x genus
+penguins_combined |> 
+  count(genus)
 
+# Species x genus
+penguins_combined |> 
+  group_by(genus) |> 
+  summarise(n_species = n_distinct(species))
+
+# Species
+penguins_combined |> 
+  group_by(species) |> 
+  summarise(n = n())
+
+
+# A function for how summarise records by variable
+summarise_records_by <- function(data, var_name){
+  data |> 
+    group_by({{var_name}}) |> 
+    summarise(n = n())
+}
+
+penguins_combined |> 
+  summarise_records_by(year)
+
+penguins_combined |> 
+  summarise_records_by(countryCode)
+
+penguins_combined |> 
+  summarise_records_by(basisOfRecord)
 ```
 
 
@@ -517,6 +579,51 @@ Demonstrator solutions:
 
 ```{r, instructor-solutions}
 
+# count the number of observations for each species in each country
+out_count <-
+  penguins_combined |>
+  group_by(species, countryCode) |>
+  summarise(.groups = "drop",
+    # number of records
+    n = n()
+  ) |>
+  filter(
+    !is.na(countryCode),
+    # consider a species present if > 3 obs
+    n > 3
+  )
+
+# Create a full grid of country x species combinations
+# unlike the counts above, this will contain cells where there are zero counts
+out_grid <- 
+  expand_grid(
+    species = unique(out_count$species),
+    countryCode = unique(out_count$countryCode)
+)
+
+# join these to get full counts
+out <-
+  left_join(
+    out_grid, out_count,
+    by = join_by(species, countryCode)
+  ) |>
+  mutate(
+    # fill zeroes
+    n = replace_na(n, 0),
+    # TRUE-FALSE if speciesa is present
+    present = n > 0
+  )
+
+out |>
+  # Reorder factor variables by number of species
+  mutate(
+    species = forcats::fct_reorder(species, present, sum),
+    countryCode = forcats::fct_reorder(countryCode, present, sum)
+  ) |>
+  # Pass modified data into ggplot
+  ggplot(aes(countryCode, species, fill= present)) +
+  geom_tile()
+
 ```
 
 
@@ -545,10 +652,55 @@ Try solving this in R using new skills:
 Demonstrator solutions: 
 
 ```{r}
+make_plot <- function(penguin_of_interest, pen_all = pen_all) {
+  world <- map_data("world")
+  specific_pen <- filter(pen_all, species == penguin_of_interest)
+  pen_large_counts <- filter(specific_pen, individualCount >= 1000)
+  pen_small_counts <- filter(specific_pen, individualCount < 1000)
+  worldplot <- ggplot() +
+    geom_polygon(data = world, aes(x = long, y = lat, group = group), fill= "grey") +
+    coord_fixed(1.3) +
+    geom_point(
+      data = pen_small_counts,
+      aes(x = decimalLongitude, y = decimalLatitude),
+      col = "red",
+      alpha = 0.1
+    ) +
+    geom_point(
+      data = pen_large_counts,
+      aes(x = decimalLongitude, y = decimalLatitude),
+      col = "red"
+    ) +
+    ggtitle(penguin_of_interest) +
+    theme_void()
+  print(worldplot)
+  return(worldplot)
+}
 
+# choose a species to try it
+penguin_species <- unique(penguins_combined$species)
+spp <- penguin_species[10]
+
+make_plot(spp, penguins_combined)
 ```
 
 
+Now let's use our new skills to make lots of plots!
+
+```{r}
+walk(penguin_species, make_plot, penguins_combined)
+```
+
+Or we could save the plots
+```{r}
+save_plot <- function(penguin_spp, data, path = "output/by_species/") {
+  dir.create(path, FALSE, TRUE)
+  p <- make_plot(penguin_spp, data)
+  ggsave(paste0(path, penguin_spp, ".png"), p)
+}
+
+walk(penguin_species, save_plot, penguins_combined)
+```
 
 ## Challenge 12 - Fit lots of models
 
@@ -578,6 +730,50 @@ Demonstrator solutions:
 
 ```{r, instructor-solutions}
 
+# filter data to only that with count data
+
+data_counts <- penguins_combined |> filter(individualCount > 0)
+
+# write a function to fit a model
+fit_model <- function(data) {
+  model <- lm(log10(individualCount) ~ decimalLatitude, data = data)
+  return(model)
+}
+
+# take in a model object and return an r2 value
+get_r2 <- function(fit) {
+  r <- performance::r2(fit)
+  return(r$R2)
+}
+```
+
+
+Let's try this on one spp
+```{r}
+# Get list of species
+pen_species <- unique(data_counts$species)
+
+# filter data to one spp
+i <- 10
+data_one_spp <- filter(data_counts, species==pen_species[i])
+fit_one_spp <- fit_model(data_one_spp )
+get_r2(fit_one_spp)
+```
+
+And now apply to many species
+
+```{r}
+# First split the data by species
+fits <-
+  data_counts |>
+  split(~species) |>
+  map(fit_model)
+
+map_dbl(fits, get_r2)
+
+# If we're happy with an anonymous function, we could skip the get_r2 function
+map_dbl(fits, ~performance::r2(.x)$R2)
+map_dbl(fits, ~performance::r2(.x)[["R2"]])
 ```
 
 
@@ -585,6 +781,41 @@ Demonstrator solutions:
 
 ```{r}
 
+penguins_nested_data <- 
+  tibble(
+    files = list.files("data/penguins", pattern=".csv", full.names = TRUE)) |> 
+  mutate(
+    data = map(files, read_csv, show_col_types = FALSE)
+   )
+
+# Alternatively
+penguins_nested_data <- 
+  list.files("data/penguins", pattern=".csv",full.names = TRUE) |> 
+  map_df(read_csv, show_col_types = FALSE) |> 
+  nest(data = -c("species"))
+
+```
+
+Now lets fits models and get r2
+
+```{r}
+# Using our pre-written functions
+penguins_nested_data_fits <- 
+  penguins_nested_data |>
+  mutate(
+    n = map_int(data, nrow),
+    fit1 = map(data, fit_model),
+    r2 = map_dbl(fits, get_r2)
+  )
+
+# Alterantively, using inline functions
+penguins_nested_data_fits <- 
+  penguins_nested_data |> 
+  mutate(
+    n = map_int(data, nrow),
+    fit1 = map(data, ~lm(log10(individualCount) ~ decimalLatitude, data = .x)),
+    r2 = map_dbl(fits, ~performance::r2(.x)$R2)
+  )
 
 ```
 
